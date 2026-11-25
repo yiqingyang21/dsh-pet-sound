@@ -31,12 +31,22 @@
     "enabled": true,
 
     // 发声方式：
-    // auto    = OneCore(Yaoyao 甜妹) → SAPI(Huihui 播报腔) → Chromium → 电子音，逐级降级（推荐）
-    // onecore = 只用 OneCore 常驻语音（最甜，默认 Yaoyao）
+    // auto    = CosyVoice2(本地真人声) → OneCore(Yaoyao) → SAPI(Huihui) → Chromium → 电子音
+    // cosy    = 只用 CosyVoice2 本地服务
+    // onecore = 只用 OneCore 常驻语音（Yaoyao，甜）
     // sapi    = 只用系统 SAPI（Huihui，成熟播报腔）
     // tts     = 只用 Chromium 的 speechSynthesis（本机看不到语音，会没声，仅排障）
     // blip    = 只用宠物电子音（按字"嘟嘟"，念不出字义，但零依赖）
     "mode": "auto",
+
+    // ---- CosyVoice2 本地服务（最高优先级）----
+    // 需要先启动：powershell -ExecutionPolicy Bypass -File D:\ai\cosy\cosy-start.ps1
+    // 服务不可用时会自动降级到下一层，不会哑
+    "cosyUrl": "http://127.0.0.1:9880",
+    "cosyEnabled": true,
+    // 留空 = 零样本（音色跟随参考音，约 3 秒/句）；
+    // 填写描述会走 instruct 模式（更慢，实测把语速拖成 3 倍，一般不建议）
+    "cosyInstruct": "",
 
     // OneCore 语音名（模糊匹配）：
     //   Yaoyao   —— 年轻女声，偏甜（默认）
@@ -44,9 +54,15 @@
     //   Kangkang —— 男声
     "onecoreVoice": "Yaoyao",
 
-    // 语速 0.5 ~ 2；音调 0.5 ~ 2.5（系统语音与电子音共用）
-    "rate": 1,
-    "pitch": 1.15,
+    // 语速 0.5 ~ 2；音调 0.5 ~ 2.5（音调对 OneCore 生效，SAPI 无音调参数）
+    //
+    // 音色预设（改这两个数就行，右键宠物「重载配置」立刻生效）：
+    //   软萌二次元（当前）：pitch 1.35 / rate 1.02   —— 高、软、稍慢
+    //   元气活泼：         pitch 1.28 / rate 1.15   —— 高、快
+    //   自然稳重：         pitch 1.05 / rate 1.00   —— 接近原声
+    //   参考：pitch 每 +0.1 ≈ 抬 8Hz；1.35 ≈ 比原声高 28Hz
+    "rate": 1.02,
+    "pitch": 1.35,
 
     // 语言：影响挑哪个系统语音
     "lang": "zh-CN",

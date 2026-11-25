@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-pet 声音系统（桌面助手半侧）—— 纯合成、零外部素材、零网络。
  *
  * 设计目标：给桌宠加"活物感"的声音，并且**绝不拖累渲染**：
@@ -50,10 +50,15 @@
       mode: 'auto',
       // OneCore 语音名（模糊匹配）：Yaoyao 年轻女声 / Huihui 成熟女声 / Kangkang 男声
       onecoreVoice: 'Yaoyao',
+      // CosyVoice2 本地服务（最高优先级）：无内置音色，靠参考音做零样本迁移
+      cosyUrl: 'http://127.0.0.1:9880',
+      cosyEnabled: true,
+      // 留空 = 纯零样本（音色跟随参考音）；填写则走 instruct 模式（更慢，一般不用）
+      cosyInstruct: '',
       enabled: true,
       volume: 0.9,
-      rate: 1,
-      pitch: 1.15,
+      rate: 1.02,
+      pitch: 1.35,
       lang: 'zh-CN',
       maxChars: 120,
       // 碎碎念 / 对话回复 / 第三方广播共用宿主同一个 say 叶子，运行时无法区分，
@@ -129,6 +134,7 @@
     sapiOk: null, // SAPI 直连可用性（null 探测中）
     sapiProbe: '',
     ocOk: null, // OneCore 常驻语音（Yaoyao）可用性
+    cosyOk: null, // CosyVoice2 本地服务可用性
     ocProbing: false,
     ocVoice: '',
     lastVoiceMode: '', // 'onecore' | 'sapi' | 'tts' | 'blip' | 'off'
@@ -673,6 +679,129 @@
     }
   }
 
+  // ---------------- CosyVoice2 本地服务（最高优先级真人声） ----------------
+  /**
+   * 为什么走 HTTP：桌宠渲染层跑不了 Python，但能 fetch 本机端口。
+   * D:\ai\cosy\server.py 常驻模型（约 2.5GB 显存），单句约 2~3 秒合成。
+   * 拿回来的 wav 用 Web Audio 播（音量走 voiceGain，和其它引擎一致）。
+   */
+  var cosySource = null;
+  var cosyAbort = null;
+
+  function cosyBase() {
+    return String(cfg.voice.cosyUrl || '').replace(/\/+$/, '');
+  }
+
+  function stopCosy() {
+    try {
+      if (cosyAbort) {
+        cosyAbort.abort();
+        cosyAbort = null;
+      }
+      if (cosySource) {
+        try {
+          cosySource.onended = null;
+          cosySource.stop();
+        } catch (e) {}
+        cosySource = null;
+      }
+    } catch (e) {}
+  }
+
+  /** 探测本地服务是否在线（1.5 秒超时，不阻塞其它引擎）。 */
+  function probeCosy() {
+    if (typeof fetch !== 'function' || typeof AbortController === 'undefined') {
+      state.cosyOk = false;
+      return;
+    }
+    if (!cfg.voice.cosyEnabled || !cosyBase()) {
+      state.cosyOk = false;
+      return;
+    }
+    var ctrl = null;
+    try {
+      ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    } catch (e) {}
+    var timer = setTimeout(function () {
+      try {
+        if (ctrl) ctrl.abort();
+      } catch (e) {}
+    }, 1500);
+    fetch(cosyBase() + '/health', ctrl ? { signal: ctrl.signal, cache: 'no-store' } : { cache: 'no-store' })
+      .then(function (r) {
+        clearTimeout(timer);
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function (j) {
+        state.cosyOk = !!(j && j.ok);
+        diag({ ev: 'cosy-probe', ok: state.cosyOk, model: j && j.model, vram: j && j.vram_mb });
+      })
+      .catch(function (e) {
+        clearTimeout(timer);
+        state.cosyOk = false;
+        diag({ ev: 'cosy-probe', ok: false, err: String(e && e.message) });
+      });
+  }
+
+  /** 请求合成并播放；返回 false 表示这次没走成（调用方继续降级）。 */
+  function cosySay(text) {
+    if (typeof fetch !== 'function' || !state.cosyOk || !cosyBase()) return false;
+    ensureContext();
+    unlock();
+    stopCosy();
+    // 掐掉正在念的其它引擎，避免两路声音重叠
+    try {
+      if (bridgeRef && typeof bridgeRef.ocStop === 'function') bridgeRef.ocStop();
+      if (bridgeRef && typeof bridgeRef.sapiStop === 'function') bridgeRef.sapiStop();
+    } catch (e) {}
+
+    var ctrl = null;
+    try {
+      ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    } catch (e) {}
+    cosyAbort = ctrl;
+
+    var body = { text: text };
+    if (cfg.voice.cosyInstruct) body.instruct = cfg.voice.cosyInstruct;
+
+    fetch(cosyBase() + '/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl ? ctrl.signal : undefined,
+      cache: 'no-store',
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function (buf) {
+        return ctx.decodeAudioData(buf.slice(0));
+      })
+      .then(function (audioBuf) {
+        if (!ctx) return;
+        var src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(voiceGain);
+        src.onended = function () {
+          if (cosySource === src) cosySource = null;
+        };
+        cosySource = src;
+        src.start(0);
+        state.spoke += 1;
+        state.lastVoiceMode = 'cosyvoice';
+        if (state.spoke === 1) diag({ ev: 'cosy-ok', text: text.slice(0, 20) });
+      })
+      .catch(function (e) {
+        // 主动 aborted 不算失败
+        if (e && e.name === 'AbortError') return;
+        state.cosyOk = false;
+        diag({ ev: 'cosy-err', err: String(e && e.message) });
+      });
+    return true;
+  }
+
   /** 异步探测 OneCore 常驻语音（Yaoyao）。首句慢，所以放在 init 里预热。 */
   function probeOc() {
     if (state.ocProbing) return;
@@ -700,7 +829,15 @@
         state.ocOk = ok;
         state.ocVoice = ok ? s.replace(/^RDY\s*/, '') : '';
         state.ocProbing = false;
-        diag({ ev: 'oc-probe', ok: ok, voice: state.ocVoice, raw: s.slice(0, 200) });
+        diag({
+          ev: 'oc-probe',
+          ok: ok,
+          voice: state.ocVoice,
+          ratePct: ratePct,
+          pitchHz: pitchHz,
+          volume: vol,
+          raw: s.slice(0, 200),
+        });
       })
       .catch(function (e) {
         state.ocOk = false;
@@ -781,6 +918,14 @@
       blip(clean);
       return 'blip';
     }
+    // 0) CosyVoice2 本地服务（真人声，最高优先级）
+    if (mode === 'cosy' || (mode === 'auto' && state.cosyOk === true)) {
+      if (cosySay(clean)) {
+        return 'cosyvoice';
+      }
+      if (mode === 'cosy') return 'off';
+    }
+
     // 1) OneCore 常驻语音（Yaoyao，最甜）
     // 进程可能被 stop() 杀掉过：顺手重新预热，这句先走下一层，下一句就回来了
     if (mode !== 'blip' && state.ocOk === null) probeOc();
@@ -890,8 +1035,11 @@
         error: bool(m.sfx.error, true),
       },
       voice: {
-        mode: ['auto', 'onecore', 'sapi', 'tts', 'blip'].indexOf(String(m.voice.mode)) >= 0 ? String(m.voice.mode) : 'auto',
+        mode: ['auto', 'cosy', 'onecore', 'sapi', 'tts', 'blip'].indexOf(String(m.voice.mode)) >= 0 ? String(m.voice.mode) : 'auto',
         onecoreVoice: str(m.voice.onecoreVoice, 'Yaoyao'),
+        cosyUrl: str(m.voice.cosyUrl, 'http://127.0.0.1:9880'),
+        cosyEnabled: bool(m.voice.cosyEnabled, true),
+        cosyInstruct: typeof m.voice.cosyInstruct === 'string' ? m.voice.cosyInstruct : '',
         enabled: bool(m.voice.enabled, true),
         volume: num(m.voice.volume, 0.9, 0, 1),
         rate: num(m.voice.rate, 1, 0.5, 2),
@@ -930,6 +1078,7 @@
           ? window.petSoundBridge
           : window.petBridge;
       bridgeRef = bridge || null;
+      probeCosy();
 
       // 把"本窗口能看见什么"写进诊断日志：这是唯一不受外部沙箱污染的证据
       function reportProbe(ok) {
@@ -994,6 +1143,7 @@
       currentUtter = null;
       // SAPI 是外部 PowerShell 进程，得单独掐
       if (bridgeRef && typeof bridgeRef.sapiStop === 'function') bridgeRef.sapiStop();
+      stopCosy();
       // OneCore 常驻进程同理：stop 后下次说话会自动重建
       if (bridgeRef && typeof bridgeRef.ocStop === 'function') {
         bridgeRef.ocStop();
@@ -1065,4 +1215,6 @@
     init();
   }
 })();
+
+
 

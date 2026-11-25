@@ -80,11 +80,27 @@ powershell -ExecutionPolicy Bypass -File say.ps1 -Text "主人，我饿啦"
 气泡出现 ──► sound-hooks.js（包装 PetSprite 原型方法）
                 │
                 ├─ 音效 ──► sound.js Web Audio 合成
-                └─ 朗读 ──► petSoundBridge（preload）
-                              ├─ OneCore：sound-onecore.ps1 常驻进程（WinRT + SoundPlayer）
-                              ├─ SAPI：PowerShell + SAPI.SpVoice
-                              └─ 兜底：Web Audio blip
+                └─ 朗读 ──► sound.js 按优先级选引擎
+                              ├─ 1. CosyVoice2 本地服务（127.0.0.1:9880，真人声）
+                              ├─ 2. OneCore：sound-onecore.ps1 常驻进程（WinRT + SoundPlayer）
+                              ├─ 3. SAPI：PowerShell + SAPI.SpVoice
+                              ├─ 4. Chromium speechSynthesis
+                              └─ 5. 兜底：Web Audio blip（按字发音，永不哑）
 ```
+
+前一层探测或调用失败会自动降级到下一层；`voice.mode` 可以强制指定只用某一层。
+
+### CosyVoice2 引擎（可选，最强效果）
+
+CosyVoice2-0.5B 是本地跑的中文 TTS，**没有内置音色**，靠一段参考音做零样本迁移。
+本仓库附带完整安装脚本与服务代码，见 **[cosyvoice/](cosyvoice/README.md)**：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\ai\cosy\cosy-start.ps1
+```
+
+实测：显存约 2.5GB，单句 1.4~2.3 秒，输出 F0 约 300Hz（少女向）。
+服务没起时桌宠自动降级，不影响使用。
 
 接线点（全部是包装，不改原文件）：
 
