@@ -50,7 +50,10 @@
       mode: 'auto',
       // OneCore 语音名（模糊匹配）：Yaoyao 年轻女声 / Huihui 成熟女声 / Kangkang 男声
       onecoreVoice: 'Yaoyao',
-      // CosyVoice2 本地服务（最高优先级）：无内置音色，靠参考音做零样本迁移
+      // Edge 在线神经语音（最高优先级，零显存）—— 需要 D:\ai\edge\server.py 在跑
+      edgeUrl: 'http://127.0.0.1:9881',
+      edgeEnabled: true,
+      // CosyVoice2 本地服务（离线后备）：无内置音色，靠参考音做零样本迁移
       cosyUrl: 'http://127.0.0.1:9880',
       cosyEnabled: true,
       // 留空 = 纯零样本（音色跟随参考音）；填写则走 instruct 模式（更慢，一般不用）
@@ -135,6 +138,8 @@
     sapiProbe: '',
     ocOk: null, // OneCore 常驻语音（Yaoyao）可用性
     cosyOk: null, // CosyVoice2 本地服务可用性
+    edgeOk: null, // Edge 在线神经语音可用性
+    edgeVoice: '',
     ocProbing: false,
     ocVoice: '',
     lastVoiceMode: '', // 'onecore' | 'sapi' | 'tts' | 'blip' | 'off'
@@ -802,6 +807,129 @@
     return true;
   }
 
+  // ---------------- Edge 神经语音（在线，零显存） ----------------
+  /**
+   * 为什么加这一层：CosyVoice2 是"克隆参考音"，如果参考音本身是合成音（系统 TTS），
+   * 克隆结果会带机械感；而且本地模型占 2.5GB 显存 + 6GB 内存。
+   * Edge 是在线神经语音（原生合成、不克隆），音色自然，本地只跑一个 60MB 转发服务。
+   * 代价是需要联网；断网时自动降级到 CosyVoice/瑶瑶/电子音。
+   */
+  var edgeSource = null;
+  var edgeAbort = null;
+
+  function edgeBase() {
+    return String(cfg.voice.edgeUrl || '').replace(/\/+$/, '');
+  }
+
+  function stopEdge() {
+    try {
+      if (edgeAbort) {
+        edgeAbort.abort();
+        edgeAbort = null;
+      }
+      if (edgeSource) {
+        try {
+          edgeSource.onended = null;
+          edgeSource.stop();
+        } catch (e) {}
+        edgeSource = null;
+      }
+    } catch (e) {}
+  }
+
+  function probeEdge() {
+    if (typeof fetch !== 'function' || typeof AbortController === 'undefined') {
+      state.edgeOk = false;
+      return;
+    }
+    if (!cfg.voice.edgeEnabled || !edgeBase()) {
+      state.edgeOk = false;
+      return;
+    }
+    var ctrl = null;
+    try {
+      ctrl = new AbortController();
+    } catch (e) {}
+    var timer = setTimeout(function () {
+      try {
+        if (ctrl) ctrl.abort();
+      } catch (e) {}
+    }, 1500);
+    fetch(edgeBase() + '/health', ctrl ? { signal: ctrl.signal, cache: 'no-store' } : { cache: 'no-store' })
+      .then(function (r) {
+        clearTimeout(timer);
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function (j) {
+        state.edgeOk = !!(j && j.ok);
+        state.edgeVoice = (j && j.voice) || '';
+        diag({ ev: 'edge-probe', ok: state.edgeOk, voice: state.edgeVoice, pitch: j && j.pitch, rate: j && j.rate });
+      })
+      .catch(function (e) {
+        clearTimeout(timer);
+        state.edgeOk = false;
+        diag({ ev: 'edge-probe', ok: false, err: String(e && e.message) });
+        // 开机时序：DSH 可能比语音服务先起来。失败就每 20 秒重试，最多 30 次（约 10 分钟）。
+        state.edgeTries = (state.edgeTries || 0) + 1;
+        if (state.edgeTries <= 30) setTimeout(probeEdge, 20000);
+      });
+  }
+
+  function edgeSay(text) {
+    if (typeof fetch !== 'function' || !state.edgeOk || !edgeBase()) return false;
+    ensureContext();
+    unlock();
+    stopEdge();
+    // 掐掉其它引擎，避免重叠
+    stopCosy();
+    try {
+      if (bridgeRef && typeof bridgeRef.ocStop === 'function') bridgeRef.ocStop();
+      if (bridgeRef && typeof bridgeRef.sapiStop === 'function') bridgeRef.sapiStop();
+    } catch (e) {}
+
+    var ctrl = null;
+    try {
+      ctrl = new AbortController();
+    } catch (e) {}
+    edgeAbort = ctrl;
+
+    fetch(edgeBase() + '/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text }),
+      signal: ctrl ? ctrl.signal : undefined,
+      cache: 'no-store',
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function (buf) {
+        return ctx.decodeAudioData(buf.slice(0));
+      })
+      .then(function (audioBuf) {
+        if (!ctx) return;
+        var src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(voiceGain);
+        src.onended = function () {
+          if (edgeSource === src) edgeSource = null;
+        };
+        edgeSource = src;
+        src.start(0);
+        state.spoke += 1;
+        state.lastVoiceMode = 'edge';
+        if (state.spoke === 1) diag({ ev: 'edge-ok', text: text.slice(0, 20), voice: state.edgeVoice });
+      })
+      .catch(function (e) {
+        if (e && e.name === 'AbortError') return;
+        state.edgeOk = false;
+        diag({ ev: 'edge-err', err: String(e && e.message) });
+      });
+    return true;
+  }
+
   /** 异步探测 OneCore 常驻语音（Yaoyao）。首句慢，所以放在 init 里预热。 */
   function probeOc() {
     if (state.ocProbing) return;
@@ -918,7 +1046,15 @@
       blip(clean);
       return 'blip';
     }
-    // 0) CosyVoice2 本地服务（真人声，最高优先级）
+    // 0) Edge 在线神经语音（最自然，零显存）
+    if (mode === 'edge' || (mode === 'auto' && state.edgeOk === true)) {
+      if (edgeSay(clean)) {
+        return 'edge';
+      }
+      if (mode === 'edge') return 'off';
+    }
+
+    // 0.5) CosyVoice2 本地服务（离线后备）
     if (mode === 'cosy' || (mode === 'auto' && state.cosyOk === true)) {
       if (cosySay(clean)) {
         return 'cosyvoice';
@@ -1035,8 +1171,10 @@
         error: bool(m.sfx.error, true),
       },
       voice: {
-        mode: ['auto', 'cosy', 'onecore', 'sapi', 'tts', 'blip'].indexOf(String(m.voice.mode)) >= 0 ? String(m.voice.mode) : 'auto',
+        mode: ['auto', 'edge', 'cosy', 'onecore', 'sapi', 'tts', 'blip'].indexOf(String(m.voice.mode)) >= 0 ? String(m.voice.mode) : 'auto',
         onecoreVoice: str(m.voice.onecoreVoice, 'Yaoyao'),
+        edgeUrl: str(m.voice.edgeUrl, 'http://127.0.0.1:9881'),
+        edgeEnabled: bool(m.voice.edgeEnabled, true),
         cosyUrl: str(m.voice.cosyUrl, 'http://127.0.0.1:9880'),
         cosyEnabled: bool(m.voice.cosyEnabled, true),
         cosyInstruct: typeof m.voice.cosyInstruct === 'string' ? m.voice.cosyInstruct : '',
@@ -1078,6 +1216,7 @@
           ? window.petSoundBridge
           : window.petBridge;
       bridgeRef = bridge || null;
+      probeEdge();
       probeCosy();
 
       // 把"本窗口能看见什么"写进诊断日志：这是唯一不受外部沙箱污染的证据
@@ -1143,6 +1282,7 @@
       currentUtter = null;
       // SAPI 是外部 PowerShell 进程，得单独掐
       if (bridgeRef && typeof bridgeRef.sapiStop === 'function') bridgeRef.sapiStop();
+      stopEdge();
       stopCosy();
       // OneCore 常驻进程同理：stop 后下次说话会自动重建
       if (bridgeRef && typeof bridgeRef.ocStop === 'function') {
@@ -1215,6 +1355,8 @@
     init();
   }
 })();
+
+
 
 
 

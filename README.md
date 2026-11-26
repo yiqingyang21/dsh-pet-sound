@@ -1,4 +1,4 @@
-# dsh-pet-sound 🎐
+﻿# dsh-pet-sound 🎐
 
 给 [@tuweizhi/dsh-pet](https://www.npmjs.com/package/@tuweizhi/dsh-pet)（DSH 桌面宠物插件）补上**声音系统**：
 事件音效 + 中文语音朗读，带四级自动降级。
@@ -81,16 +81,32 @@ powershell -ExecutionPolicy Bypass -File say.ps1 -Text "主人，我饿啦"
                 │
                 ├─ 音效 ──► sound.js Web Audio 合成
                 └─ 朗读 ──► sound.js 按优先级选引擎
-                              ├─ 1. CosyVoice2 本地服务（127.0.0.1:9880，真人声）
-                              ├─ 2. OneCore：sound-onecore.ps1 常驻进程（WinRT + SoundPlayer）
-                              ├─ 3. SAPI：PowerShell + SAPI.SpVoice
-                              ├─ 4. Chromium speechSynthesis
-                              └─ 5. 兜底：Web Audio blip（按字发音，永不哑）
+                              ├─ 1. Edge 在线神经语音（127.0.0.1:9881，零显存）
+                              ├─ 2. CosyVoice2 本地服务（127.0.0.1:9880）
+                              ├─ 3. OneCore：sound-onecore.ps1 常驻进程（WinRT + SoundPlayer）
+                              ├─ 4. SAPI：PowerShell + SAPI.SpVoice
+                              ├─ 5. Chromium speechSynthesis
+                              └─ 6. 兜底：Web Audio blip（按字发音，永不哑）
 ```
 
 前一层探测或调用失败会自动降级到下一层；`voice.mode` 可以强制指定只用某一层。
 
-### CosyVoice2 引擎（可选，最强效果）
+### Edge 神经语音（默认首选）
+
+微软 Edge 的在线神经语音（`edge-tts`），**原生合成、零显存**，本地只跑一个 60MB 转发服务。
+见 **[edge/](edge/README.md)**：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\ai\edge\edge-start.ps1
+```
+
+实测：显存占用比 CosyVoice 方案少 **3.8 GB**，可用内存多 **5.9 GB**，单句延迟 1.7~2.4 秒。
+默认音色 `zh-CN-XiaoyiNeural`（晓伊）+25Hz。
+
+> 为什么有了 CosyVoice 还要 Edge：CosyVoice 是**克隆参考音**，
+> 参考音若是合成音，克隆结果会带机械感。Edge 是原生合成，没有这层损耗。
+
+### CosyVoice2 引擎（离线后备）
 
 CosyVoice2-0.5B 是本地跑的中文 TTS，**没有内置音色**，靠一段参考音做零样本迁移。
 本仓库附带完整安装脚本与服务代码，见 **[cosyvoice/](cosyvoice/README.md)**：
@@ -157,3 +173,4 @@ $env:ELECTRON_RUN_AS_NODE = "1"
 
 MIT（见 [LICENSE](LICENSE)）。本仓库不包含 `@tuweizhi/dsh-pet` 的任何代码，
 仅在运行时对其做原型包装；该插件本身的许可见其包内 LICENSE。
+

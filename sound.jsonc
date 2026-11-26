@@ -31,13 +31,20 @@
     "enabled": true,
 
     // 发声方式：
-    // auto    = CosyVoice2(本地真人声) → OneCore(Yaoyao) → SAPI(Huihui) → Chromium → 电子音
-    // cosy    = 只用 CosyVoice2 本地服务
+    // auto    = Edge(在线晓伊) → CosyVoice2(本地) → OneCore(瑶瑶) → SAPI → Chromium → 电子音
+    // edge    = 只用 Edge 在线神经语音（最自然，零显存，需联网）
+    // cosy    = 只用 CosyVoice2 本地服务（离线后备，占 2.5GB 显存）
     // onecore = 只用 OneCore 常驻语音（Yaoyao，甜）
     // sapi    = 只用系统 SAPI（Huihui，成熟播报腔）
     // tts     = 只用 Chromium 的 speechSynthesis（本机看不到语音，会没声，仅排障）
     // blip    = 只用宠物电子音（按字"嘟嘟"，念不出字义，但零依赖）
     "mode": "auto",
+
+    // ---- Edge 在线神经语音（首选）----
+    // 启动：powershell -ExecutionPolicy Bypass -File D:\ai\edge\edge-start.ps1
+    // 音色/音调/语速在服务端的环境变量里调（EDGE_VOICE / EDGE_PITCH / EDGE_RATE）
+    "edgeUrl": "http://127.0.0.1:9881",
+    "edgeEnabled": true,
 
     // ---- CosyVoice2 本地服务（最高优先级）----
     // 需要先启动：powershell -ExecutionPolicy Bypass -File D:\ai\cosy\cosy-start.ps1
